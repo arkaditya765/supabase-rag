@@ -1,70 +1,93 @@
 from supabase import create_client
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from google import genai
+import google.generativeai as genai
 import os
 
-# Load environment variables
+# Load env
 load_dotenv()
 
-# Supabase credentials
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Initialize Supabase
+# Init clients
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Load embedding model
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+genai.configure(api_key=GEMINI_API_KEY)
 
-# Initialize Gemini client
-gemini = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# ⚠️ use working model (you already tested)
+gemini_model = genai.GenerativeModel("gemini-pro")
 
-# Ask user question
-question = input("Ask a news question: ")
+# 👇 Hardcode for now (we’ll replace with UI later)
+# Fetch available stories
+stories = supabase.table("newspresso_aggregated_news_in_duplicate") \
+    .select("id, content_title") \
+    .limit(20) \
+    .execute()
 
-print("\nProcessing...\n")
+story_list = stories.data
 
-# Convert question to embedding
-query_embedding = embedding_model.encode(question).tolist()
+print("\nAvailable Stories:\n")
 
-# Retrieve relevant news from Supabase
-result = supabase.rpc(
-    "match_news",
-    {
-        "query_embedding": query_embedding,
-        "match_count": 5
-    }
-).execute()
+for i, story in enumerate(story_list):
+    print(f"{i+1}. {story['content_title']}")
 
-# Build context from retrieved articles
-context = ""
+# User selects story
+choice = int(input("\nSelect story number: ")) - 1
 
-for item in result.data:
-    context += f"Title: {item['content_title']}\n"
-    context += f"Summary: {item['content_summary']}\n\n"
+selected_story_id = story_list[choice]["id"]
 
-# Create prompt for Gemini
-prompt = f"""
-You are a news assistant.
+print(f"\n✅ Selected: {story_list[choice]['content_title']}")
+while True:
+    question = input("\nAsk a question (or type 'exit'): ")
 
-Use the news articles below to answer the user's question.
+    if question.lower() == "exit":
+        break
 
-News Articles:
-{context}
+    # Step 1: Embed question
+    query_embedding = model.encode(question).tolist()
 
-User Question:
-{question}
+    # Step 2: Retrieve relevant articles (ONLY this story)
+    result = supabase.rpc(
+        "match_articles_by_story",
+        {
+            "query_embedding": query_embedding,
+            "match_count": 5,
+            "input_story_id": selected_story_id
+        }
+    ).execute()
 
-Give a clear and concise answer based only on the news provided.
+    articles = result.data
+
+    # Step 3: Build context
+    context = ""
+
+    for item in articles:
+        context += f"""
+Title: {item['article_title']}
+Source: {item['article_source']}
+URL: {item['article_url']}
+Content: {item['article_content']}
+---
 """
 
-# Generate answer using Gemini
-response = gemini.models.generate_content(
-    model="gemini-flash-latest",
-    contents=prompt
-)
+    # Step 4: Ask Gemini
+    prompt = f"""
+You are a news assistant.
 
-# Print final answer
-print("Answer:\n")
-print(response.text)
+Answer the question using ONLY the provided articles.
+Give a clear answer and cite sources.
+
+Articles:
+{context}
+
+Question:
+{question}
+"""
+
+    response = gemini_model.generate_content(prompt)
+
+    print("\n🧠 Answer:\n")
+    print(response.text)
